@@ -1,93 +1,96 @@
 import streamlit as st
 import firebase_admin
 from firebase_admin import credentials, firestore
-import pandas as pd
-from datetime import datetime
+from google.cloud.firestore_v1 import Client
+import os
+from dotenv import load_dotenv
 
-# Inicializar o Firebase
-cred = credentials.Certificate('path/to/your/firebase_config.json')
-firebase_admin.initialize_app(cred)
+import os
+from dotenv import load_dotenv
+import firebase_admin
+from firebase_admin import credentials, firestore
+
+# Carregar variáveis de ambiente do arquivo .env
+load_dotenv()
+
+# Obter o caminho para o arquivo de credenciais
+firebase_credentials_path = os.getenv('FIREBASE_CREDENTIALS_PATH')
+
+# Inicializar o Firebase se não estiver inicializado
+if not firebase_admin._apps:
+    cred = credentials.Certificate(firebase_credentials_path)
+    firebase_admin.initialize_app(cred)
 
 # Conectar ao Firestore
 db = firestore.client()
 
-def fetch_data():
-    # Consultar a subcoleção "Status" dentro da coleção "Projetos"
-    statuses_ref = db.collection('Projetos').document('status').collection('Status')
-    docs = statuses_ref.stream()
-   
-    data = []
-    for doc in docs:
-        data.append(doc.to_dict())
-   
-    return pd.DataFrame(data)
+# Função para buscar dados de status do Firestore
+def get_project_status():
+    statuses = db.collection('Status').stream()
+    status_list = []
+    total_setup = 0
+    total_mrr = 0
+    latest_date = None
 
-def process_data(df):
-    # Processar os dados
-    df['Data'] = pd.to_datetime(df['Data'], format='%d/%m/%Y')
-    df['Previsão de término fase'] = pd.to_datetime(df['Previsão de término fase'], format='%d/%m/%Y')
-    df['Previsão de término projeto'] = pd.to_datetime(df['Previsão de término projeto'], format='%d/%m/%Y')
-   
-    latest_date = df['Data'].max()
-    total_setup = df['Setup'].sum()
-    total_mrr = df['MRR'].sum()
-   
-    # Criar um resumo
-    summary = {
-        'Data': latest_date.strftime('%d/%m/%Y'),
-        'Setup': f'R$ {total_setup:,.2f}',
-        'MRR': f'R$ {total_mrr:,.2f}'
-    }
-   
-    # Adicionar coluna de status como farol
-    def status_color(status):
-        if status == 'Concluído':
-            return 'green'
-        elif status == 'Em andamento':
-            return 'yellow'
-        else:
-            return 'red'
-   
-    df['Status Color'] = df['Status'].apply(status_color)
-   
-    return summary, df
+    # Itera sobre os documentos e acumula os dados
+    for status in statuses:
+        data = status.to_dict()
+        # Calcular a soma de Setup e MRR
+        total_setup += data.get('Setup', 0)
+        total_mrr += data.get('MRR', 0)
 
-# Streamlit Interface
+        # Verificar a data mais recente
+        current_date = data.get('Data')
+        if latest_date is None or current_date > latest_date:
+            latest_date = current_date
+
+        # Adiciona cada status à lista
+        status_list.append({
+            'Projeto': data.get('Projeto'),
+            'Status': data.get('Status'),
+            'Previsão de término': data.get('Previsão de término projeto'),
+            'Setup': data.get('Setup'),
+            'MRR': data.get('MRR'),
+            'Último status report': data.get('Último status report')
+        })
+    
+    return latest_date, total_setup, total_mrr, status_list
+
+# Função para transformar status em farol
+def get_status_color(status):
+    if status == "verde":
+        return "🟢"
+    elif status == "amarelo":
+        return "🟡"
+    elif status == "vermelho":
+        return "🔴"
+    else:
+        return "⚪"
+
+# Exibe a aplicação no Streamlit
 def main():
-    st.title('Dashboard de Projetos')
+    st.title("Dashboard de Status do Portfólio de Projetos")
 
-    data = fetch_data()
-    if data.empty:
-        st.write('Nenhum dado disponível.')
-        return
-   
-    summary, processed_data = process_data(data)
+    # Obter dados do Firestore
+    latest_date, total_setup, total_mrr, status_list = get_project_status()
 
-    # Exibir resumo do portfólio
-    st.header('Resumo do Portfólio')
-    st.write(f"**Data mais recente:** {summary['Data']}")
-    st.write(f"**Total Setup:** {summary['Setup']}")
-    st.write(f"**Total MRR:** {summary['MRR']}")
-   
-    # Exibir tabela de status
-    st.header('Status dos Projetos')
-   
-    def render_status_color(val):
-        return f'<span style="color: {val};">●</span>'
-   
-    processed_data['Status Color'] = processed_data['Status Color'].apply(render_status_color)
-   
-    # Exibir a tabela com links clicáveis
-    def link_html(url):
-        if pd.notna(url):
-            return f'<a href="{url}" target="_blank">Último Status Report</a>'
-        return 'N/A'
+    # Primeira linha com o resumo
+    st.subheader("Resumo do Portfólio")
+    st.write(f"Data mais recente: {latest_date}")
+    st.write(f"Total Setup: R$ {total_setup:.2f}")
+    st.write(f"Total MRR: R$ {total_mrr:.2f}")
 
-    processed_data['Último Status Report Link'] = processed_data['Último status report'].apply(link_html)
-   
-    # Criar uma tabela para visualização
-    st.write(processed_data[['Projeto', 'Status Color', 'Previsão de término projeto', 'Setup', 'MRR', 'Último Status Report Link']]
-             .rename(columns={'Status Color': 'Status'}).to_html(escape=False, index=False), unsafe_allow_html=True)
+    # Tabela de status dos projetos
+    st.subheader("Detalhes dos Projetos")
+    for status in status_list:
+        st.markdown(f"**Projeto**: {status['Projeto']}")
+        st.markdown(f"**Status**: {get_status_color(status['Status'])}")
+        st.markdown(f"**Previsão de término**: {status['Previsão de término']}")
+        st.markdown(f"**Setup**: R$ {status['Setup']:.2f}")
+        st.markdown(f"**MRR**: R$ {status['MRR']:.2f}")
+        if st.button(f"Ver último status report ({status['Projeto']})"):
+            st.write(f"[Último status report]({status['Último status report']})")
+        st.write("---")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
